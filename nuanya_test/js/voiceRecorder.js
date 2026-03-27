@@ -65,9 +65,64 @@ async function getDeepseekSummary(textToSummarize) {
     }
 }
 
+async function getDeepseekElderQuestion(textToSummarize) {
+    const input = (textToSummarize || '').trim();
+    if (!input) throw new Error('转写文本为空，无法整理问题');
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    try {
+        const payload = {
+            model: DEEPSEEK_MODEL,
+            messages: [
+                {
+                    role: "system",
+                    content:
+                        "你是一个养老健康问答助手。你的任务是把用户口述的内容整理成一个明确、简短、可发布的提问。要求：1) 只输出一个中文问题句；2) 不要给建议或回答；3) 不提育儿/宝宝/新生儿等词；4) 句子尽量不超过30字；5) 必须以“？”结尾。"
+                },
+                { role: "user", content: input }
+            ],
+            stream: false
+        };
+
+        const resp = await fetch(DEEPSEEK_API_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal
+        });
+
+        const text = await resp.text();
+        if (!resp.ok) {
+            throw new Error(`DeepSeek请求失败：HTTP ${resp.status} ${resp.statusText}${text ? ` - ${text}` : ''}`);
+        }
+
+        let json;
+        try {
+            json = JSON.parse(text);
+        } catch {
+            throw new Error(`DeepSeek返回不是JSON：${text.slice(0, 300)}`);
+        }
+
+        const question = json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content
+            ? String(json.choices[0].message.content).trim()
+            : '';
+
+        if (!question) throw new Error('DeepSeek未返回问题内容');
+        return question;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 // 提供给其它脚本（如 main.js 的“语音提问”流程）复用
 window.NuanyaDeepseek = window.NuanyaDeepseek || {};
 window.NuanyaDeepseek.summarize = getDeepseekSummary;
+window.NuanyaDeepseek.summarizeElderQuestion = getDeepseekElderQuestion;
 
 function getAnswerAiElements() {
     const wrapper = document.getElementById('summaryWrapper');

@@ -352,7 +352,7 @@ body, html {
 
 .cancel-button { background-color: #95a5a6; color: white; border: none; padding: 15px 30px; border-radius: 10px; font-size: 28px; cursor: pointer; }
 .cancel-button:hover { background-color: #7f8c8d; }
-.success-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(253, 246, 227, 0.9); display: flex; justify-content: center; align-items: center; text-align: center; color: var(--text-color); z-index: 300; opacity: 0; pointer-events: none; transition: opacity 0.5s; }
+.success-overlay { position: fixed; top: 0; left: 50%; transform: translateX(-50%); width: 100%; max-width: 480px; height: 100vh; background-color: rgba(253, 246, 227, 0.9); display: flex; justify-content: center; align-items: center; text-align: center; color: var(--text-color); z-index: 300; opacity: 0; pointer-events: none; transition: opacity 0.5s; }
 .success-overlay.visible { opacity: 1; pointer-events: auto; }
 .success-content h2 { font-size: 34px; }
 

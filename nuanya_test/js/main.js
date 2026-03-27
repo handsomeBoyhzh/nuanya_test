@@ -121,6 +121,18 @@ async function loadMyAnswers() {
         }
     } catch (e) {
         console.error('loadMyAnswers error:', e);
+        const fallbackFromDb = (window.MockDB && Array.isArray(window.MockDB.answers) && window.MockDB.answers.length)
+            ? window.MockDB.answers.map(a => ({
+                ...a,
+                question: a && a.question ? a.question : { title: '未知问题', category: '' }
+            }))
+            : null;
+
+        if (fallbackFromDb) {
+            renderMyAnswers(fallbackFromDb);
+            return;
+        }
+
         // 使用模拟数据作为后备：老人回答的育儿问题
         const mockData = [
             {
@@ -179,13 +191,17 @@ function renderMyAnswers(answers) {
     }
     
     const html = answers.map(answer => {
-        const createTime = new Date(answer.create_time).toLocaleDateString('zh-CN');
+        const q = (answer && answer.question) ? answer.question : {};
+        const questionTitle = (q && q.title) ? q.title : (answer.question_title || '未知问题');
+        const questionCategory = (q && q.category) ? q.category : (answer.category || '');
+        const answerText = answer.answer_text || answer.content || '';
+        const createTime = new Date(answer.create_time || answer.created_at || Date.now()).toLocaleDateString('zh-CN');
         
         return `
             <div class="answer-item">
-                <div class="answer-question-title">${answer.question.title}</div>
-                <div class="answer-question-category">${answer.question.category}</div>
-                <div class="answer-text" data-analyze="1">${answer.answer_text}</div>
+                <div class="answer-question-title">${questionTitle}</div>
+                <div class="answer-question-category">${questionCategory}</div>
+                <div class="answer-text" data-analyze="1">${answerText}</div>
                 <div class="answer-meta">
                     <span class="answer-time">${createTime}</span>
                 </div>
@@ -541,15 +557,24 @@ async function apiPost(path, body) {
     }
     if (path.includes('/api/answers')) {
         const q = window.MockDB.momQuestions.find(q => q.id === body.question_id) || window.MockDB.elderQuestions.find(q => q.id === body.question_id);
+        const qMeta = q ? { id: q.id, title: q.title, category: q.category } : { id: body.question_id, title: '未知问题', category: '' };
         const ans = {
             id: window.MockDB.generateId(),
             question_id: body.question_id,
             answer_text: body.answer_text,
             create_time: new Date().toISOString(),
-            question: q || { title: '未知问题' }
+            question: qMeta
         };
         window.MockDB.answers.unshift(ans);
-        if (q && q.answers) q.answers.push(ans);
+        if (q && q.answers) {
+            q.answers.push({
+                id: ans.id,
+                question_id: ans.question_id,
+                answer_text: ans.answer_text,
+                create_time: ans.create_time,
+                question: { ...qMeta }
+            });
+        }
         window.MockDB.save();
         return { code: 200, success: true, data: ans };
     }
@@ -925,19 +950,41 @@ async function uploadAskVoiceFile(audioBlob) {
         // 1) 先展示转写文本
         if (originalEl) originalEl.textContent = transcript;
 
-        // 2) 再进行分析展示
+        // 2) 仅做“简单问题总结”（提问模块不做经验分析）
         askSummaryText = '';
-        if (window.NuanyaDeepseek && typeof window.NuanyaDeepseek.summarize === 'function') {
-            askSummaryText = await window.NuanyaDeepseek.summarize(transcript);
+        const askSummarizer = (window.NuanyaDeepseek && (
+            (typeof window.NuanyaDeepseek.summarizeElderQuestion === 'function' && window.NuanyaDeepseek.summarizeElderQuestion) ||
+            (typeof window.NuanyaDeepseek.summarizeAskQuestion === 'function' && window.NuanyaDeepseek.summarizeAskQuestion) ||
+            (typeof window.NuanyaDeepseek.summarize === 'function' && window.NuanyaDeepseek.summarize)
+        )) || null;
+
+        if (askSummarizer) {
+            try {
+                const raw = await askSummarizer(transcript);
+                askSummaryText = String(raw || '').replace(/\s+/g, ' ').trim();
+            } catch {
+                askSummaryText = transcript;
+            }
         } else {
-            askSummaryText = "问题总结：" + transcript.substring(0, 30) + (transcript.length > 30 ? "..." : "");
+            askSummaryText = transcript;
+        }
+
+        askSummaryText = (askSummaryText || '').replace(/^问题总结[:：]\s*/g, '').trim();
+        if (askSummaryText) {
+            askSummaryText = askSummaryText.split(/\n+/).map(s => s.trim()).filter(Boolean)[0] || askSummaryText;
+            askSummaryText = askSummaryText.replace(/[。！!]+$/g, '');
+            if (!/[？?]$/.test(askSummaryText)) askSummaryText = `${askSummaryText}？`;
+        } else {
+            const fallback = transcript.substring(0, 30) + (transcript.length > 30 ? "..." : "");
+            askSummaryText = `我想咨询：${fallback}？`;
+        }
+
+        if (askSummaryText.length > 38) {
+            const head = askSummaryText.slice(0, 37).replace(/[？?]$/g, '');
+            askSummaryText = `${head}...？`;
         }
         if (refinedEl) {
-            if (window.ExperienceAnalyzer) {
-                await window.ExperienceAnalyzer.renderInto(refinedEl, transcript, '育儿/健康问题/经验');
-            } else {
-                refinedEl.innerHTML = `<p>${askSummaryText}</p>`;
-            }
+            refinedEl.innerHTML = `<p>${askSummaryText}</p>`;
         }
 
         // 3) 最后尝试上传（失败不影响展示/提问）
@@ -997,11 +1044,9 @@ async function submitAskByVoice() {
     try {
         const payload = {
             title: title || '语音提问',
-            category: category || '其他',
+            category: category || '健康养生',
             content,
-            tags: [],
-            baby_age_months: 6,
-            urgency_level: 'normal'
+            tags: []
         };
         const json = await apiPost('/api/mom/questions/ask/', payload);
         if (json && json.success) {
@@ -1048,9 +1093,7 @@ async function submitAsk() {
             title,
             category,
             content,
-            tags: [],
-            baby_age_months: 6,
-            urgency_level: 'normal'
+            tags: []
         };
         const json = await apiPost('/api/mom/questions/ask/', payload);
         if (json && json.success) {
@@ -1258,17 +1301,39 @@ function loadQuestionDetail(questionId) {
         currentQuestion = question;
         document.getElementById('questionTitleDetail').textContent = question.title || '';
         document.getElementById('questionContentDetail').textContent = question.content || '';
-        // 重置摘要区
-        lastVoiceFileUrl = null; lastTranscriptText = ''; lastSummaryText = '';
-        document.getElementById('summaryWrapper').classList.remove('visible');
-        document.getElementById('aiLoading').style.display = 'block';
-        document.getElementById('aiResults').style.display = 'none';
-        // 清空显示区，避免残留测试文案
-        const origEl = document.querySelector('.original-text');
-        const suggEl = document.querySelector('.refined-suggestions');
-        if (origEl) origEl.textContent = '';
-        if (suggEl) suggEl.innerHTML = '';
+        resetAnswerFlowUI();
     }
+}
+
+function resetAnswerFlowUI() {
+    // 重置摘要区和录音状态，确保可重复录音/转写/分析
+    lastVoiceFileUrl = null;
+    lastTranscriptText = '';
+    lastSummaryText = '';
+
+    const summaryWrapper = document.getElementById('summaryWrapper');
+    const aiLoading = document.getElementById('aiLoading');
+    const aiResults = document.getElementById('aiResults');
+    const uploadProgress = document.getElementById('uploadProgress');
+    const uploadProgressText = document.getElementById('uploadProgressText');
+    const uploadProgressBar = document.getElementById('uploadProgressBar');
+    const origEl = document.querySelector('.original-text');
+    const suggEl = document.querySelector('.refined-suggestions');
+
+    if (summaryWrapper) {
+        summaryWrapper.style.display = ''; // 清理 cancel 时写入的 none
+        summaryWrapper.classList.remove('visible');
+    }
+    if (aiLoading) aiLoading.style.display = 'block';
+    if (aiResults) aiResults.style.display = 'none';
+    if (uploadProgress) uploadProgress.style.display = 'none';
+    if (uploadProgressText) uploadProgressText.style.display = 'none';
+    if (uploadProgressBar) uploadProgressBar.style.width = '0%';
+    if (origEl) origEl.textContent = '';
+    if (suggEl) suggEl.innerHTML = '';
+
+    recordingState = 'idle';
+    if (typeof updateRecordingUI === 'function') updateRecordingUI('idle');
 }
 
 // 个人中心：加载用户信息与设置
@@ -1476,23 +1541,16 @@ async function cancelRecording() {
     try {
         // 调用清理音频文件的API
         await cleanupVoiceFiles();
-        
-        // 隐藏AI结果区域
-        const summaryWrapper = document.getElementById('summaryWrapper');
-        const aiResults = document.getElementById('aiResults');
-        if (summaryWrapper) summaryWrapper.style.display = 'none';
-        if (aiResults) aiResults.style.display = 'none';
-        
-        // 重置录音状态
-        const statusText = document.getElementById('statusText');
-        if (statusText) statusText.textContent = '';
-        
+
+        // 标准化重置（可再次录音）
+        resetAnswerFlowUI();
+
         // 显示成功消息
-        showMessage('录音已取消，音频文件已删除', 'success');
+        if (typeof showToast === 'function') showToast('已取消本次回答，可重新录制');
         
     } catch (error) {
         console.error('取消录音时出错:', error);
-        showMessage('取消录音失败，请重试', 'error');
+        if (typeof showToast === 'function') showToast('取消录音失败，请重试');
     }
 }
 
